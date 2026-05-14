@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>IdadeID Checkout Trigger Test</title>
+  <style>
+    body { font-family: Arial, sans-serif; max-width: 880px; margin: 40px auto; padding: 0 20px; color: #0f172a; }
+    .card { border: 1px solid #dbe3ef; border-radius: 16px; padding: 20px; margin: 16px 0; }
+    button, a.button { display: inline-block; margin: 8px 8px 8px 0; padding: 12px 16px; border-radius: 10px; border: 1px solid #94a3b8; background: white; color: #0f172a; text-decoration: none; cursor: pointer; }
+    .primary { background: #0f766e; color: white; border-color: #0f766e; }
+    .muted { color: #64748b; }
+    code { background: #f1f5f9; padding: 2px 6px; border-radius: 6px; }
+  </style>
+</head>
+<body>
+  <h1>Teste do IdadeID Smart Checkout Trigger</h1>
+  <p class="muted">Substitua a public key no script no final deste arquivo. Use <code>?idadeid_debug=1</code> na URL para ver logs.</p>
+
+  <div class="card cart-drawer">
+    <h2>Carrinho</h2>
+    <button>Adicionar ao carrinho</button>
+    <button>Calcular frete</button>
+    <button>Aplicar cupom</button>
+    <button>Continuar comprando</button>
+    <a class="button primary" href="/checkout">Finalizar compra</a>
+  </div>
+
+  <div class="card product-actions">
+    <h2>Produto</h2>
+    <button>Add to cart</button>
+    <button class="primary" data-action="buy-now" onclick="window.location.href='/checkout'">Comprar agora</button>
+  </div>
+
+  <div class="card">
+    <h2>Form de checkout</h2>
+    <form action="/checkout" method="get">
+      <button type="submit" name="checkout" class="primary">Ir para pagamento</button>
+    </form>
+  </div>
+
+  <script
+    src="/widget/checkout-trigger.js?v=1.0.0"
+    data-site-key="SUBSTITUA_PELA_PUBLIC_KEY_DO_SITE">
+  </script>
+</body>
+</html>
