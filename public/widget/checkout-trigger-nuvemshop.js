@@ -1,14 +1,11 @@
 (function () {
   "use strict";
 
-  var VERSION = "1.0.1-nuvemshop-gate-rpc";
+  var VERSION = "1.0.2-nuvemshop-gate-rpc";
 
   var SUPABASE_URL = "https://jrhcgndbpxbhmrgsezdd.supabase.co";
   var SUPABASE_ANON_KEY =
-    "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmNndmRicHhiaG1yZ3NlemRkIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzgzMjk1OTQsImV4cCI6MjA5MzkwNTU5NH0.kuxOJCvhH3KrxcTPMaf0rvjUmiqm1smonqeOSXtTjf8".replace(
-      "Y2d2",
-      "Z25k"
-    );
+    "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImpyaGNnbmRicHhiaG1yZ3NlemRkIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzgzMjk1OTQsImV4cCI6MjA5MzkwNTU5NH0.kuxOJCvhH3KrxcTPMaf0rvjUmiqm1smonqeOSXtTjf8";
 
   if (window.top !== window.self) {
     return;
