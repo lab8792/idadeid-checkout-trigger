@@ -699,50 +699,115 @@
 
     setTimeout(function () {
       try {
-        if (context && context.form) {
-          submitNuvemshopForm(context.form);
-          return;
-        }
-
         if (context && context.element && context.element.click) {
           context.element.setAttribute("data-idadeid-resuming", "true");
           context.element.click();
+          return;
+        }
+
+        if (context && context.form) {
+          warn("retomada por formulário evitada para não gerar /comprar/ branco");
+          resumeNuvemshopCheckout({
+            reason: "resume_original_form_fallback",
+            formAction: context.form.getAttribute("action") || "",
+            formMethod: context.form.getAttribute("method") || "post"
+          });
           return;
         }
       } finally {
         setTimeout(function () {
           setResuming(false);
           window.__IDADEID_NUVEMSHOP_CHECKOUT_BYPASS__ = false;
-        }, 1500);
+        }, 2500);
       }
     }, 0);
   }
 
   function resumeNuvemshopCheckout(pending) {
-    var form =
-      document.querySelector('form.js-ajax-cart-panel[data-store="cart-form"]') ||
-      document.querySelector("form.js-ajax-cart-panel") ||
-      document.querySelector('form[data-store="cart-form"]');
+    log("resume Nuvemshop por clique nativo", pending);
 
-    if (form) {
-      submitNuvemshopForm(form);
+    window.__IDADEID_NUVEMSHOP_CHECKOUT_BYPASS__ = true;
+    setResuming(true);
+
+    var checkoutButton =
+      document.querySelector('input[name="go_to_checkout"]') ||
+      document.querySelector('[data-component="cart.checkout-button"]') ||
+      document.querySelector('#ajax-cart-submit-div input[type="submit"]');
+
+    if (checkoutButton && typeof checkoutButton.click === "function") {
+      log("clicando no botão nativo de checkout Nuvemshop");
+
+      setTimeout(function () {
+        try {
+          checkoutButton.click();
+        } catch (err) {
+          warn("falha ao clicar no botão nativo", err);
+        }
+
+        setTimeout(function () {
+          setResuming(false);
+          window.__IDADEID_NUVEMSHOP_CHECKOUT_BYPASS__ = false;
+        }, 2500);
+      }, 350);
+
       return;
     }
 
-    var fallbackForm = document.createElement("form");
-    fallbackForm.method = (pending && pending.formMethod) || "post";
-    fallbackForm.action = (pending && pending.formAction) || "/comprar/";
-    fallbackForm.style.display = "none";
+    var cartButton =
+      document.querySelector('[data-component="cart-button"]') ||
+      document.querySelector('[data-store="cart-button"]') ||
+      document.querySelector('a[href*="carrinho"]') ||
+      document.querySelector('a[href*="cart"]') ||
+      document.querySelector('button[aria-label*="Carrinho"]') ||
+      document.querySelector('button[aria-label*="cart"]');
 
-    ensureHiddenInput(fallbackForm, "go_to_checkout", "Iniciar Compra");
+    if (cartButton && typeof cartButton.click === "function") {
+      log("abrindo carrinho para encontrar botão de checkout");
 
-    document.body.appendChild(fallbackForm);
+      try {
+        cartButton.click();
+      } catch (err2) {
+        warn("falha ao abrir carrinho", err2);
+      }
 
-    try {
-      HTMLFormElement.prototype.submit.call(fallbackForm);
-    } catch (err) {
-      window.location.href = "/comprar/";
+      setTimeout(function () {
+        var delayedCheckoutButton =
+          document.querySelector('input[name="go_to_checkout"]') ||
+          document.querySelector('[data-component="cart.checkout-button"]') ||
+          document.querySelector('#ajax-cart-submit-div input[type="submit"]');
+
+        if (
+          delayedCheckoutButton &&
+          typeof delayedCheckoutButton.click === "function"
+        ) {
+          log("clicando no botão nativo após abrir carrinho");
+
+          try {
+            delayedCheckoutButton.click();
+          } catch (err3) {
+            warn("falha ao clicar após abrir carrinho", err3);
+          }
+        } else {
+          warn("botão nativo de checkout não encontrado após abrir carrinho");
+        }
+
+        setTimeout(function () {
+          setResuming(false);
+          window.__IDADEID_NUVEMSHOP_CHECKOUT_BYPASS__ = false;
+        }, 2500);
+      }, 900);
+
+      return;
     }
+
+    warn(
+      "botão nativo de checkout não encontrado; evitando submit direto para não gerar tela branca"
+    );
+
+    setTimeout(function () {
+      setResuming(false);
+      window.__IDADEID_NUVEMSHOP_CHECKOUT_BYPASS__ = false;
+    }, 2500);
   }
 
   function submitNuvemshopForm(form) {
