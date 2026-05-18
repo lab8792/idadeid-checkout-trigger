@@ -1,789 +1,738 @@
+/**
+ * IdadeID Smart Checkout Trigger v1.0.0
+ * Camada externa de acionamento antes do checkout.
+ * NÃO substitui o widget de acesso. NÃO altera o loader v2.0.14-clean.
+ */
 (function () {
-  "use strict";
+  'use strict';
 
-  var VERSION = "1.0.1-nuvemshop-checkout-adapter";
+  var VERSION = '1.0.0';
+  var SUPABASE_URL = 'https://jrhcgndbpxbhmrgsezdd.supabase.co';
+  var SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImpyaGNnbmRicHhiaG1yZ3NlemRkIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzgzMjk1OTQsImV4cCI6MjA5MzkwNTU5NH0.kuxOJCvhH3KrxcTPMaf0rvjUmiqm1smonqeOSXtTjf8';
 
-  if (window.__IDADEID_CHECKOUT_TRIGGER_ACTIVE__) {
+  if (window.top !== window.self) {
     return;
   }
 
-  window.__IDADEID_CHECKOUT_TRIGGER_ACTIVE__ = true;
-
-  var script = getCurrentScript();
-  var config = readConfig(script);
-
-  var STATE_PREFIX = "idadeid_checkout:";
-  var VERIFIED_KEY = STATE_PREFIX + "verified:" + (config.siteKey || config.siteId || "unknown");
-  var PENDING_KEY = STATE_PREFIX + "pending:" + (config.siteKey || config.siteId || "unknown");
-  var IN_PROGRESS_KEY = STATE_PREFIX + "in_progress:" + (config.siteKey || config.siteId || "unknown");
-
-  log("carregado", {
-    version: VERSION,
-    siteKey: mask(config.siteKey),
-    siteId: config.siteId || null,
-    platform: config.platform || null,
-    storeId: config.storeId || null
-  });
-
-  boot();
-
-  function boot() {
-    if (!config.siteKey && !config.siteId) {
-      warn("data-site-key/data-site-id ausente. O trigger foi carregado, mas não tem identificação do site.");
-    }
-
-    var markedVerified = markVerifiedFromReturnUrl();
-
-    document.addEventListener("click", onClickCapture, true);
-    document.addEventListener("submit", onSubmitCapture, true);
-
-    if (markedVerified || isVerified()) {
-      setTimeout(function () {
-        resumePendingCheckoutIfAny();
-      }, 250);
-    }
+  window.IdadeIDCheckoutTrigger = window.IdadeIDCheckoutTrigger || {};
+  if (window.IdadeIDCheckoutTrigger.__booted) {
+    return;
   }
+  window.IdadeIDCheckoutTrigger.__booted = true;
+  window.IdadeIDCheckoutTrigger.version = VERSION;
 
-  function onClickCapture(event) {
-    if (window.__IDADEID_CHECKOUT_BYPASS__) {
-      return;
-    }
+  var state = {
+    siteKey: null,
+    siteHash: null,
+    config: null,
+    sessionValid: false,
+    sessionValidationStarted: false,
+    sessionValidationPromise: null,
+    armed: false,
+    isResuming: false,
+    lastAnalysis: null,
+    lastError: null,
+  };
 
-    var target = event.target;
-
-    if (!target || !target.closest) {
-      return;
-    }
-
-    var element = target.closest(
-      'a, button, input, [role="button"], [onclick], [data-component="cart.checkout-button"]'
-    );
-
-    if (!element) {
-      return;
-    }
-
-    if (!isCheckoutIntentElement(element)) {
-      return;
-    }
-
-    if (isVerified()) {
-      log("checkout liberado: usuário já verificado", {
-        reason: detectReason(element),
-      });
-      return;
-    }
-
-    interceptCheckout(event, {
-      element: element,
-      form: getRelatedForm(element),
-      reason: detectReason(element) || "checkout_click",
-    });
-  }
-
-  function onSubmitCapture(event) {
-    if (window.__IDADEID_CHECKOUT_BYPASS__) {
-      return;
-    }
-
-    var form = event.target;
-
-    if (!form || !isCheckoutIntentForm(form)) {
-      return;
-    }
-
-    if (isVerified()) {
-      log("submit liberado: usuário já verificado", {
-        reason: "checkout_form_verified",
-      });
-      return;
-    }
-
-    interceptCheckout(event, {
-      element:
-        event.submitter ||
-        form.querySelector(
-          'input[name="go_to_checkout"], [data-component="cart.checkout-button"], button[type="submit"], input[type="submit"]'
-        ),
-      form: form,
-      reason: "checkout_form_submit",
-    });
-  }
-
-  function interceptCheckout(event, context) {
+  function hasDebug() {
     try {
-      event.preventDefault();
-      event.stopPropagation();
+      var url = new URL(window.location.href);
+      if (url.searchParams.get('idadeid_debug') === '1') return true;
+      return localStorage.getItem('idadeid_debug') === '1';
+    } catch (e) {
+      return false;
+    }
+  }
 
-      if (event.stopImmediatePropagation) {
-        event.stopImmediatePropagation();
-      }
-    } catch (err) {}
+  function log(message, data) {
+    if (!hasDebug()) return;
+    if (typeof data !== 'undefined') {
+      console.log('[IdadeID Checkout] ' + message, data);
+    } else {
+      console.log('[IdadeID Checkout] ' + message);
+    }
+  }
 
-    savePendingCheckout(context);
-    setStorage(IN_PROGRESS_KEY, String(Date.now()));
+  function warn(message, data) {
+    if (!hasDebug()) return;
+    if (typeof data !== 'undefined') {
+      console.warn('[IdadeID Checkout] ' + message, data);
+    } else {
+      console.warn('[IdadeID Checkout] ' + message);
+    }
+  }
 
-    showBlockingOverlay();
+  function hash(str) {
+    var h = 0;
+    for (var i = 0; i < str.length; i++) {
+      h = ((h << 5) - h) + str.charCodeAt(i);
+      h |= 0;
+    }
+    return Math.abs(h).toString(36).substring(0, 8);
+  }
 
-    log("checkout interceptado", {
-      reason: context.reason,
-      platform: config.platform,
-      storeId: config.storeId,
+  function rpc(name, payload) {
+    return fetch(SUPABASE_URL + '/rest/v1/rpc/' + name, {
+      method: 'POST',
+      headers: {
+        apikey: SUPABASE_ANON_KEY,
+        Authorization: 'Bearer ' + SUPABASE_ANON_KEY,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(payload || {}),
+    })
+      .then(function (res) { return res.json(); })
+      .catch(function (err) {
+        state.lastError = err && err.message ? err.message : String(err);
+        warn('RPC ' + name + ' failed', err);
+        return { ok: false, error: state.lastError };
+      });
+  }
+
+  function rpcWithTimeout(name, payload, ms) {
+    ms = ms || 8000;
+    return Promise.race([
+      rpc(name, payload),
+      new Promise(function (_, reject) {
+        setTimeout(function () { reject(new Error('timeout')); }, ms);
+      }),
+    ]).catch(function (err) {
+      state.lastError = err && err.message ? err.message : String(err);
+      warn('RPC ' + name + ' timeout/error', err);
+      return { ok: false, error: state.lastError === 'timeout' ? 'timeout' : state.lastError };
     });
-
-    openVerificationFlow();
   }
 
-  function isCheckoutIntentElement(element) {
-    if (!element) {
-      return false;
+  function resolveSiteKey() {
+    var resolved = null;
+    var scripts;
+
+    if (document.currentScript && document.currentScript.dataset && document.currentScript.dataset.siteKey) {
+      resolved = document.currentScript.dataset.siteKey;
     }
 
-    if (isAddToCartElement(element)) {
-      return false;
+    if (!resolved && document.currentScript && document.currentScript.getAttribute('data-site-key')) {
+      resolved = document.currentScript.getAttribute('data-site-key');
     }
 
-    if (isNuvemshopCheckoutButton(element)) {
-      return true;
+    if (!resolved) {
+      scripts = document.querySelectorAll('script[src*="checkout-trigger.js"]');
+      for (var i = 0; i < scripts.length; i++) {
+        if (scripts[i].getAttribute('data-site-key')) {
+          resolved = scripts[i].getAttribute('data-site-key');
+          break;
+        }
+      }
     }
 
-    var text = normalizeText(
-      element.innerText ||
-        element.textContent ||
-        element.value ||
-        element.getAttribute("aria-label") ||
-        element.getAttribute("title") ||
-        ""
-    );
-
-    var href = normalizeText(element.href || element.getAttribute("href") || "");
-    var className = normalizeText(typeof element.className === "string" ? element.className : "");
-    var id = normalizeText(element.id || "");
-    var name = normalizeText(element.getAttribute("name") || "");
-    var dataComponent = normalizeText(element.getAttribute("data-component") || "");
-    var onclick = normalizeText(element.getAttribute("onclick") || "");
-
-    var haystack = [
-      text,
-      href,
-      className,
-      id,
-      name,
-      dataComponent,
-      onclick,
-    ].join(" ");
-
-    if (
-      haystack.indexOf("iniciar compra") >= 0 ||
-      haystack.indexOf("finalizar compra") >= 0 ||
-      haystack.indexOf("finalizar pedido") >= 0 ||
-      haystack.indexOf("ir para o checkout") >= 0 ||
-      haystack.indexOf("checkout") >= 0
-    ) {
-      return true;
+    if (!resolved) {
+      var publicKeyScript = document.querySelector('script[data-public-key]');
+      if (publicKeyScript) resolved = publicKeyScript.getAttribute('data-public-key');
     }
 
-    if (
-      href.indexOf("/checkout") >= 0 ||
-      href.indexOf("/cart/checkout") >= 0 ||
-      href.indexOf("/carrinho/checkout") >= 0
-    ) {
-      return true;
+    if (!resolved && window.IDADEID_SITE_KEY) {
+      resolved = window.IDADEID_SITE_KEY;
     }
 
-    return false;
-  }
-
-  function isCheckoutIntentForm(form) {
-    if (!form) {
-      return false;
-    }
-
-    if (isNuvemshopCheckoutForm(form)) {
-      return true;
-    }
-
-    var action = normalizeText(form.getAttribute("action") || "");
-
-    if (
-      action.indexOf("/checkout") >= 0 ||
-      action.indexOf("/cart/checkout") >= 0 ||
-      action.indexOf("/carrinho/checkout") >= 0
-    ) {
-      return true;
-    }
-
-    return false;
-  }
-
-  function isNuvemshopCheckoutButton(element) {
-    if (!element) {
-      return false;
-    }
-
-    var direct =
-      safeMatches(element, 'input[name="go_to_checkout"]') ||
-      safeMatches(element, '[data-component="cart.checkout-button"]') ||
-      safeMatches(element, '#ajax-cart-submit-div input[type="submit"]');
-
-    if (direct) {
-      return true;
-    }
-
-    var closest =
-      safeClosest(element, 'input[name="go_to_checkout"]') ||
-      safeClosest(element, '[data-component="cart.checkout-button"]') ||
-      safeClosest(element, "#ajax-cart-submit-div");
-
-    return Boolean(closest);
-  }
-
-  function isNuvemshopCheckoutForm(form) {
-    if (!form) {
-      return false;
-    }
-
-    var action = normalizeText(form.getAttribute("action") || "");
-    var dataStore = normalizeText(form.getAttribute("data-store") || "");
-    var className = normalizeText(typeof form.className === "string" ? form.className : "");
-
-    var hasCheckoutButton = Boolean(
-      form.querySelector(
-        'input[name="go_to_checkout"], [data-component="cart.checkout-button"]'
-      )
-    );
-
-    var isCartForm =
-      dataStore === "cart-form" ||
-      className.indexOf("js-ajax-cart-panel") >= 0;
-
-    return isCartForm && hasCheckoutButton && action.indexOf("/comprar") >= 0;
-  }
-
-  function isAddToCartElement(element) {
-    if (!element) {
-      return false;
-    }
-
-    var form = getRelatedForm(element);
-    var formAction = form ? normalizeText(form.getAttribute("action") || "") : "";
-    var className = normalizeText(typeof element.className === "string" ? element.className : "");
-    var dataComponent = normalizeText(element.getAttribute("data-component") || "");
-    var name = normalizeText(element.getAttribute("name") || "");
-    var value = normalizeText(element.value || "");
-
-    if (name === "go_to_checkout") {
-      return false;
-    }
-
-    if (dataComponent === "cart.checkout-button") {
-      return false;
-    }
-
-    if (
-      className.indexOf("js-addtocart") >= 0 ||
-      className.indexOf("btn-add-to-cart") >= 0 ||
-      dataComponent.indexOf("product.add-to-cart") >= 0
-    ) {
-      return true;
-    }
-
-    if (
-      form &&
-      form.id === "product_form" &&
-      formAction.indexOf("/comprar") >= 0 &&
-      !form.querySelector('input[name="go_to_checkout"], [data-component="cart.checkout-button"]')
-    ) {
-      return true;
-    }
-
-    if (value === "comprar" && formAction.indexOf("/comprar") >= 0) {
-      return true;
-    }
-
-    return false;
-  }
-
-  function detectReason(element) {
-    if (isNuvemshopCheckoutButton(element)) {
-      return "nuvemshop_cart_checkout_button";
-    }
-
-    var form = getRelatedForm(element);
-
-    if (isNuvemshopCheckoutForm(form)) {
-      return "nuvemshop_cart_checkout_form";
-    }
-
-    return "generic_checkout_intent";
-  }
-
-  function getRelatedForm(element) {
-    if (!element) {
+    if (!resolved) {
+      state.lastError = 'missing_site_key';
+      warn('site key não encontrada');
       return null;
     }
 
-    if (element.tagName === "FORM") {
-      return element;
-    }
-
-    if (element.closest) {
-      return element.closest("form");
-    }
-
-    return null;
+    state.siteKey = resolved;
+    state.siteHash = hash(resolved);
+    log('site key resolvida', { siteHash: state.siteHash });
+    return resolved;
   }
 
-  function savePendingCheckout(context) {
-    var form = context.form;
-    var element = context.element;
+  function storageKey() {
+    return state.siteHash ? 'idadeid_as_' + state.siteHash : null;
+  }
 
-    var pending = {
-      version: VERSION,
-      created_at: Date.now(),
-      reason: context.reason || null,
-      platform: config.platform || null,
-      store_id: config.storeId || null,
-      site_id: config.siteId || null,
-      site_key: config.siteKey || null,
-      page_url: window.location.href,
-      form_action: form ? form.getAttribute("action") || null : null,
-      form_method: form ? form.getAttribute("method") || "post" : null,
-      is_nuvemshop_cart_form: Boolean(isNuvemshopCheckoutForm(form)),
-      element_name: element ? element.getAttribute("name") || null : null,
-      element_value: element ? element.value || element.innerText || null : null,
-      element_component: element ? element.getAttribute("data-component") || null : null,
+  function pendingKey() {
+    return state.siteHash ? 'idadeid_pending_checkout_' + state.siteHash : null;
+  }
+
+  function resumingKey() {
+    return state.siteHash ? 'idadeid_resuming_checkout_' + state.siteHash : null;
+  }
+
+  function getStoredSession() {
+    var key = storageKey();
+    if (!key) return null;
+    try {
+      var stored = localStorage.getItem(key);
+      return stored ? JSON.parse(stored) : null;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function saveSession(session) {
+    var key = storageKey();
+    if (!key || !session) return;
+    try {
+      localStorage.setItem(key, JSON.stringify(session));
+      log('sessão salva', { key: key, id: session.id });
+    } catch (e) {
+      warn('não foi possível salvar sessão', e);
+    }
+  }
+
+  function clearSession() {
+    var key = storageKey();
+    if (!key) return;
+    try { localStorage.removeItem(key); } catch (e) { /* ignore */ }
+  }
+
+  function getUrlCode() {
+    try {
+      return new URL(window.location.href).searchParams.get('idadeid_code');
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function cleanUrlCode() {
+    try {
+      var url = new URL(window.location.href);
+      url.searchParams.delete('idadeid_code');
+      window.history.replaceState({}, '', url.toString());
+    } catch (e) { /* ignore */ }
+  }
+
+  async function loadConfig() {
+    if (state.config) return state.config;
+
+    var result = await rpcWithTimeout('get_public_widget_config', {
+      p_public_key: state.siteKey,
+      p_origin: window.location.origin,
+      p_current_url: window.location.href,
+    }, 8000);
+
+    if (!result || result.ok !== true) {
+      state.lastError = result && result.error ? result.error : 'invalid_config';
+      warn('config inválida; trigger ficará inativo', result);
+      return null;
+    }
+
+    state.config = result;
+    log('config carregada', result);
+    return result;
+  }
+
+  async function validateStoredSession() {
+    if (state.sessionValid) return true;
+    if (state.sessionValidationPromise) return state.sessionValidationPromise;
+
+    state.sessionValidationStarted = true;
+    state.sessionValidationPromise = (async function () {
+      var stored = getStoredSession();
+      if (!stored || !stored.id || !stored.jti) {
+        log('sem sessão local');
+        state.sessionValid = false;
+        return false;
+      }
+
+      var result = await rpcWithTimeout('validate_access_session', {
+        p_public_key: state.siteKey,
+        p_access_session_id: stored.id,
+        p_jti: stored.jti,
+        p_origin: window.location.origin,
+        p_current_url: window.location.href,
+      }, 8000);
+
+      if (result && result.ok === true && result.valid === true) {
+        state.sessionValid = true;
+        log('sessão local válida');
+        return true;
+      }
+
+      log('sessão local inválida, limpando', result);
+      state.sessionValid = false;
+      clearSession();
+      return false;
+    })().finally(function () {
+      state.sessionValidationPromise = null;
+    });
+
+    return state.sessionValidationPromise;
+  }
+
+  async function exchangeCodeIfPresent() {
+    var code = getUrlCode();
+    if (!code) return false;
+
+    log('idadeid_code encontrado, fazendo exchange');
+
+    var result = await rpcWithTimeout('exchange_access_code', {
+      p_public_key: state.siteKey,
+      p_access_code: code,
+      p_origin: window.location.origin,
+      p_current_url: window.location.href,
+    }, 8000);
+
+    cleanUrlCode();
+
+    if (!result || result.ok !== true || !result.access_session) {
+      clearSession();
+      state.sessionValid = false;
+      state.lastError = result && result.error ? result.error : 'exchange_failed';
+      warn('exchange falhou', result);
+      return false;
+    }
+
+    saveSession(result.access_session);
+
+    var validateResult = await rpcWithTimeout('validate_access_session', {
+      p_public_key: state.siteKey,
+      p_access_session_id: result.access_session.id,
+      p_jti: result.access_session.jti,
+      p_origin: window.location.origin,
+      p_current_url: window.location.href,
+    }, 8000);
+
+    if (validateResult && validateResult.ok === true && validateResult.valid === true) {
+      state.sessionValid = true;
+      log('sessão pós-exchange válida');
+      await resumePendingCheckout();
+      return true;
+    }
+
+    clearSession();
+    state.sessionValid = false;
+    state.lastError = 'invalid_session_after_exchange';
+    warn('sessão pós-exchange inválida', validateResult);
+    return false;
+  }
+
+  function normalizeText(value) {
+    return String(value || '')
+      .toLowerCase()
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+
+  function elementText(el) {
+    if (!el) return '';
+    var parts = [];
+    var attrs = ['aria-label', 'title', 'name', 'id', 'class', 'value', 'data-testid', 'data-test', 'data-action', 'data-checkout'];
+    try { parts.push(el.innerText || el.textContent || ''); } catch (e) { /* ignore */ }
+    attrs.forEach(function (attr) {
+      try { parts.push(el.getAttribute(attr) || ''); } catch (e) { /* ignore */ }
+    });
+    return normalizeText(parts.join(' '));
+  }
+
+  function closestCandidate(target) {
+    if (!target || !target.closest) return null;
+    return target.closest('a, button, input[type="button"], input[type="submit"], [role="button"], [data-checkout], form');
+  }
+
+  function nearestForm(el) {
+    if (!el) return null;
+    if (el.tagName && el.tagName.toLowerCase() === 'form') return el;
+    if (el.form) return el.form;
+    return el.closest ? el.closest('form') : null;
+  }
+
+  function isInCartContext(el) {
+    var node = el;
+    var depth = 0;
+    while (node && node !== document && depth < 6) {
+      var info = normalizeText([
+        node.id || '',
+        node.className || '',
+        node.getAttribute ? (node.getAttribute('aria-label') || '') : '',
+        node.getAttribute ? (node.getAttribute('data-section') || '') : '',
+        node.getAttribute ? (node.getAttribute('data-testid') || '') : '',
+      ].join(' '));
+
+      if (/cart|carrinho|minicart|mini cart|drawer|sacola|bag/.test(info)) return true;
+      node = node.parentNode;
+      depth++;
+    }
+    return false;
+  }
+
+  function addScore(scores, points, reason) {
+    scores.total += points;
+    scores.reasons.push({ points: points, reason: reason });
+  }
+
+  function analyzeCheckoutIntent(target, event) {
+    var candidate = closestCandidate(target);
+    var form = nearestForm(candidate || target);
+    var href = '';
+    var formAction = '';
+    var text = '';
+    var scores = { total: 0, reasons: [] };
+
+    if (!candidate && form) candidate = form;
+    if (!candidate) {
+      return { intercept: false, score: 0, reasons: [], candidate: null, type: 'unknown' };
+    }
+
+    try {
+      if (candidate.tagName && candidate.tagName.toLowerCase() === 'a') href = candidate.href || candidate.getAttribute('href') || '';
+    } catch (e) { /* ignore */ }
+
+    try {
+      if (form) formAction = form.action || form.getAttribute('action') || '';
+    } catch (e) { /* ignore */ }
+
+    text = normalizeText([
+      elementText(candidate),
+      form ? elementText(form) : '',
+      href,
+      formAction,
+    ].join(' '));
+
+    if (/\/checkout\b|\/checkout\//.test(normalizeText(href))) addScore(scores, 100, 'href /checkout');
+    if (/\/checkout\b|\/checkout\//.test(normalizeText(formAction))) addScore(scores, 100, 'form action /checkout');
+    if (/\bcheckout\b/.test(text)) addScore(scores, 80, 'texto/atributo checkout');
+    if (/finalizar compra|finalizar pedido|concluir compra/.test(text)) addScore(scores, 90, 'finalizar compra');
+    if (/comprar agora|buy now|comprar ja|compra agora/.test(text)) addScore(scores, 80, 'comprar agora/buy now');
+    if (/ir para pagamento|continuar para pagamento|prosseguir para pagamento|fechar pedido/.test(text)) addScore(scores, 80, 'pagamento/fechar pedido');
+    if (/\bname checkout\b|\bid checkout\b/.test(text)) addScore(scores, 90, 'name/id checkout');
+    if (/class.*checkout|checkout.*button|btn.*checkout/.test(text)) addScore(scores, 60, 'class checkout');
+    if (isInCartContext(candidate)) addScore(scores, 25, 'contexto carrinho/minicart');
+
+    if (/adicionar ao carrinho|add to cart|colocar no carrinho|por no carrinho/.test(text)) addScore(scores, -90, 'add to cart não bloqueia');
+    if (/continuar comprando|continue shopping/.test(text)) addScore(scores, -100, 'continuar comprando');
+    if (/remover|remove|excluir|delete/.test(text)) addScore(scores, -100, 'remover item');
+    if (/atualizar carrinho|update cart|recalcular|calcular frete|cupom|coupon|discount/.test(text)) addScore(scores, -80, 'ação auxiliar de carrinho');
+
+    var type = 'button';
+    if (href) type = 'link';
+    else if (form && (!candidate || candidate === form || (event && event.type === 'submit'))) type = 'form';
+
+    var result = {
+      intercept: scores.total >= 70,
+      score: scores.total,
+      reasons: scores.reasons,
+      candidate: candidate,
+      form: form,
+      href: href,
+      formAction: formAction,
+      type: type,
+      text: text.slice(0, 300),
     };
 
-    setStorage(PENDING_KEY, JSON.stringify(pending));
+    state.lastAnalysis = {
+      intercept: result.intercept,
+      score: result.score,
+      reasons: result.reasons,
+      type: result.type,
+      href: result.href,
+      formAction: result.formAction,
+      text: result.text,
+    };
+
+    return result;
   }
 
-  function resumePendingCheckoutIfAny() {
-    var pending = getPendingCheckout();
-
-    if (!pending) {
-      return;
-    }
-
-    if (!isVerified()) {
-      return;
-    }
-
-    removeStorage(PENDING_KEY);
-    removeStorage(IN_PROGRESS_KEY);
-
-    log("retomando checkout pendente", {
-      reason: pending.reason,
-      platform: pending.platform,
-    });
-
-    window.__IDADEID_CHECKOUT_BYPASS__ = true;
-
-    setTimeout(function () {
-      if (pending.is_nuvemshop_cart_form || pending.platform === "nuvemshop") {
-        resumeNuvemshopCheckout();
-        return;
-      }
-
-      resumeGenericCheckout(pending);
-    }, 350);
+  function cssEscape(value) {
+    if (window.CSS && window.CSS.escape) return window.CSS.escape(value);
+    return String(value).replace(/[^a-zA-Z0-9_-]/g, '\\$&');
   }
 
-  function resumeNuvemshopCheckout() {
-    var form =
-      document.querySelector('form.js-ajax-cart-panel[data-store="cart-form"]') ||
-      document.querySelector("form.js-ajax-cart-panel") ||
-      document.querySelector('form[data-store="cart-form"]');
+  function getElementSelector(el) {
+    if (!el || !el.tagName) return null;
+    if (el.id) return '#' + cssEscape(el.id);
 
-    if (form) {
-      ensureHiddenInput(form, "go_to_checkout", "Iniciar Compra");
-
-      try {
-        HTMLFormElement.prototype.submit.call(form);
-        return;
-      } catch (err) {
-        try {
-          form.submit();
-          return;
-        } catch (err2) {}
-      }
+    var testAttrs = ['data-testid', 'data-test', 'data-action', 'data-checkout', 'name'];
+    for (var i = 0; i < testAttrs.length; i++) {
+      var attr = testAttrs[i];
+      var val = el.getAttribute && el.getAttribute(attr);
+      if (val) return el.tagName.toLowerCase() + '[' + attr + '="' + String(val).replace(/"/g, '\\"') + '"]';
     }
 
-    var fallbackForm = document.createElement("form");
-    fallbackForm.method = "post";
-    fallbackForm.action = "/comprar/";
-    fallbackForm.style.display = "none";
-
-    ensureHiddenInput(fallbackForm, "go_to_checkout", "Iniciar Compra");
-
-    document.body.appendChild(fallbackForm);
-
-    try {
-      HTMLFormElement.prototype.submit.call(fallbackForm);
-    } catch (err) {
-      window.location.href = "/comprar/";
-    }
-  }
-
-  function resumeGenericCheckout(pending) {
-    if (pending && pending.form_action) {
-      var form = document.createElement("form");
-      form.method = pending.form_method || "post";
-      form.action = pending.form_action;
-      form.style.display = "none";
-      document.body.appendChild(form);
-
-      try {
-        HTMLFormElement.prototype.submit.call(form);
-        return;
-      } catch (err) {}
-    }
-
-    window.location.reload();
-  }
-
-  function openVerificationFlow() {
-    var verificationUrl = buildVerificationUrl();
-
-    log("abrindo verificação", {
-      url: verificationUrl,
-    });
-
-    window.location.assign(verificationUrl);
-  }
-
-  function buildVerificationUrl() {
-    var base =
-      config.verifyUrl ||
-      (config.siteId
-        ? "https://verificar.idadeid.com.br/g/" + encodeURIComponent(config.siteId)
-        : "https://verificar.idadeid.com.br");
-
-    var url = new URL(base, window.location.href);
-
-    var returnUrl = new URL(window.location.href);
-    returnUrl.searchParams.set("idadeid_checkout_return", "1");
-
-    if (config.siteKey) {
-      returnUrl.searchParams.set("idadeid_site_key", config.siteKey);
-      url.searchParams.set("site_key", config.siteKey);
-      url.searchParams.set("public_key", config.siteKey);
-    }
-
-    if (config.siteId) {
-      url.searchParams.set("site_id", config.siteId);
-    }
-
-    if (config.tenantId) {
-      url.searchParams.set("tenant_id", config.tenantId);
-    }
-
-    if (config.storeId) {
-      url.searchParams.set("store_id", config.storeId);
-    }
-
-    if (config.storeDomain) {
-      url.searchParams.set("store_domain", config.storeDomain);
-    }
-
-    url.searchParams.set("source", "checkout");
-    url.searchParams.set("platform", config.platform || "unknown");
-    url.searchParams.set("mode", "checkout");
-    url.searchParams.set("returnTo", returnUrl.toString());
-    url.searchParams.set("return_to", returnUrl.toString());
-    url.searchParams.set("redirect_uri", returnUrl.toString());
-
-    return url.toString();
-  }
-
-  function markVerifiedFromReturnUrl() {
-    var params = new URLSearchParams(window.location.search);
-
-    var hasReturnFlag = params.get("idadeid_checkout_return") === "1";
-
-    var approved =
-      params.get("idadeid_verified") === "1" ||
-      params.get("idadeid_access") === "granted" ||
-      params.get("idadeid_status") === "approved" ||
-      params.get("status") === "approved" ||
-      Boolean(params.get("idadeid_access_code")) ||
-      Boolean(params.get("access_code")) ||
-      Boolean(params.get("idadeid_code"));
-
-    if (!hasReturnFlag && !approved) {
-      return false;
-    }
-
-    if (!approved) {
-      return false;
-    }
-
-    setVerified();
-
-    try {
-      var clean = new URL(window.location.href);
-      [
-        "idadeid_checkout_return",
-        "idadeid_site_key",
-        "idadeid_verified",
-        "idadeid_access",
-        "idadeid_status",
-        "status",
-        "idadeid_access_code",
-        "access_code",
-        "idadeid_code",
-      ].forEach(function (key) {
-        clean.searchParams.delete(key);
+    var path = [];
+    var node = el;
+    var depth = 0;
+    while (node && node.nodeType === 1 && node !== document.body && depth < 5) {
+      var tag = node.tagName.toLowerCase();
+      var parent = node.parentNode;
+      if (!parent) break;
+      var siblings = Array.prototype.filter.call(parent.children || [], function (child) {
+        return child.tagName && child.tagName.toLowerCase() === tag;
       });
-
-      window.history.replaceState({}, document.title, clean.toString());
-    } catch (err) {}
-
-    return true;
-  }
-
-  function setVerified() {
-    var expiresAt = Date.now() + 1000 * 60 * 60 * 12;
-
-    setStorage(
-      VERIFIED_KEY,
-      JSON.stringify({
-        verified: true,
-        created_at: Date.now(),
-        expires_at: expiresAt,
-      })
-    );
-  }
-
-  function isVerified() {
-    var raw = getStorage(VERIFIED_KEY);
-
-    if (!raw) {
-      return false;
+      if (siblings.length > 1) {
+        tag += ':nth-of-type(' + (siblings.indexOf(node) + 1) + ')';
+      }
+      path.unshift(tag);
+      node = parent;
+      depth++;
     }
+    return path.length ? path.join(' > ') : null;
+  }
+
+  function savePendingCheckout(analysis) {
+    var key = pendingKey();
+    if (!key) return;
+
+    var form = analysis.form || null;
+    var payload = {
+      type: analysis.type || 'button',
+      href: analysis.href || '',
+      formAction: analysis.formAction || '',
+      candidateSelector: getElementSelector(analysis.candidate),
+      formSelector: form ? getElementSelector(form) : null,
+      page_url: window.location.href,
+      created_at: Date.now(),
+    };
 
     try {
-      var parsed = JSON.parse(raw);
-
-      if (!parsed.verified) {
-        return false;
-      }
-
-      if (parsed.expires_at && Number(parsed.expires_at) < Date.now()) {
-        removeStorage(VERIFIED_KEY);
-        return false;
-      }
-
-      return true;
-    } catch (err) {
-      removeStorage(VERIFIED_KEY);
-      return false;
+      sessionStorage.setItem(key, JSON.stringify(payload));
+      log('pending checkout salvo', payload);
+    } catch (e) {
+      warn('não foi possível salvar pending checkout', e);
     }
   }
 
   function getPendingCheckout() {
-    var raw = getStorage(PENDING_KEY);
-
-    if (!raw) {
-      return null;
-    }
-
+    var key = pendingKey();
+    if (!key) return null;
     try {
-      var pending = JSON.parse(raw);
-      var age = Date.now() - Number(pending.created_at || 0);
-
-      if (age > 1000 * 60 * 30) {
-        removeStorage(PENDING_KEY);
+      var raw = sessionStorage.getItem(key);
+      if (!raw) return null;
+      var payload = JSON.parse(raw);
+      if (!payload || !payload.created_at) return null;
+      if (Date.now() - payload.created_at > 15 * 60 * 1000) {
+        sessionStorage.removeItem(key);
         return null;
       }
-
-      return pending;
-    } catch (err) {
-      removeStorage(PENDING_KEY);
+      return payload;
+    } catch (e) {
       return null;
     }
   }
 
-  function showBlockingOverlay() {
-    if (document.getElementById("idadeid-checkout-overlay")) {
-      return;
-    }
-
-    var overlay = document.createElement("div");
-    overlay.id = "idadeid-checkout-overlay";
-    overlay.setAttribute("aria-live", "polite");
-
-    overlay.style.position = "fixed";
-    overlay.style.inset = "0";
-    overlay.style.zIndex = "2147483647";
-    overlay.style.background = "rgba(255, 255, 255, 0.82)";
-    overlay.style.backdropFilter = "blur(4px)";
-    overlay.style.display = "flex";
-    overlay.style.alignItems = "center";
-    overlay.style.justifyContent = "center";
-    overlay.style.fontFamily =
-      "Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif";
-
-    overlay.innerHTML =
-      '<div style="width:min(420px,calc(100vw - 32px));background:#fff;border:1px solid rgba(15,23,42,.12);box-shadow:0 20px 60px rgba(15,23,42,.14);border-radius:24px;padding:28px;text-align:center;color:#0f172a;">' +
-      '<div style="font-weight:800;font-size:18px;margin-bottom:8px;">IdadeID</div>' +
-      '<div style="font-weight:700;font-size:20px;margin-bottom:8px;">Verificação necessária</div>' +
-      '<div style="font-size:14px;color:#475569;line-height:1.45;">Você será redirecionado para validar a idade antes de continuar a compra.</div>' +
-      "</div>";
-
-    document.body.appendChild(overlay);
+  function clearPendingCheckout() {
+    var key = pendingKey();
+    if (!key) return;
+    try { sessionStorage.removeItem(key); } catch (e) { /* ignore */ }
   }
 
-  function ensureHiddenInput(form, name, value) {
-    var input = form.querySelector('input[name="' + cssEscape(name) + '"]');
-
-    if (!input) {
-      input = document.createElement("input");
-      input.type = "hidden";
-      input.name = name;
-      form.appendChild(input);
-    }
-
-    input.value = value;
-  }
-
-  function readConfig(scriptEl) {
-    return {
-      siteKey: getAttr(scriptEl, "site-key") || getAttr(scriptEl, "public-key"),
-      siteId: getAttr(scriptEl, "site-id"),
-      tenantId: getAttr(scriptEl, "tenant-id"),
-      storeId: getAttr(scriptEl, "store-id"),
-      storeDomain: getAttr(scriptEl, "store-domain"),
-      platform: getAttr(scriptEl, "platform") || detectPlatform(),
-      verifyUrl: getAttr(scriptEl, "verify-url"),
-    };
-  }
-
-  function getCurrentScript() {
-    if (document.currentScript) {
-      return document.currentScript;
-    }
-
-    return (
-      document.querySelector('script[data-idadeid-loader="checkout"]') ||
-      document.querySelector('script[src*="checkout-trigger.js"]') ||
-      null
-    );
-  }
-
-  function getAttr(el, name) {
-    if (!el || !el.getAttribute) {
-      return "";
-    }
-
-    return (
-      el.getAttribute("data-" + name) ||
-      el.getAttribute(name) ||
-      ""
-    );
-  }
-
-  function detectPlatform() {
-    var host = String(window.location.hostname || "").toLowerCase();
-
-    if (
-      host.indexOf("lojavirtualnuvem.com.br") >= 0 ||
-      host.indexOf("mitiendanube.com") >= 0 ||
-      host.indexOf("tiendanube.com") >= 0
-    ) {
-      return "nuvemshop";
-    }
-
-    if (host.indexOf("myshopify.com") >= 0) {
-      return "shopify";
-    }
-
-    return "custom";
-  }
-
-  function safeMatches(el, selector) {
+  function setResuming(value) {
+    state.isResuming = !!value;
+    var key = resumingKey();
+    if (!key) return;
     try {
-      return Boolean(el && el.matches && el.matches(selector));
-    } catch (err) {
+      if (value) sessionStorage.setItem(key, '1');
+      else sessionStorage.removeItem(key);
+    } catch (e) { /* ignore */ }
+  }
+
+  function isResuming() {
+    if (state.isResuming) return true;
+    var key = resumingKey();
+    if (!key) return false;
+    try { return sessionStorage.getItem(key) === '1'; } catch (e) { return false; }
+  }
+
+  async function redirectToGate(analysis) {
+    var config = state.config || await loadConfig();
+    var gateUrl = config && config.gate && config.gate.url;
+
+    if (!gateUrl) {
+      state.lastError = 'gate_url_missing';
+      warn('gate_url ausente; checkout liberado para não quebrar loja');
+      return resumeOriginalNow(analysis);
+    }
+
+    savePendingCheckout(analysis);
+
+    var sep = gateUrl.indexOf('?') !== -1 ? '&' : '?';
+    var finalUrl = gateUrl + sep + 'return_url=' + encodeURIComponent(window.location.href);
+    log('redirecionando para gate', finalUrl);
+    window.location.href = finalUrl;
+  }
+
+  function findElement(selector) {
+    if (!selector) return null;
+    try { return document.querySelector(selector); } catch (e) { return null; }
+  }
+
+  function submitForm(form, submitter) {
+    if (!form) return false;
+    try {
+      if (submitter && form.requestSubmit) {
+        form.requestSubmit(submitter);
+        return true;
+      }
+      if (form.requestSubmit) {
+        form.requestSubmit();
+        return true;
+      }
+      form.submit();
+      return true;
+    } catch (e) {
+      warn('falha ao submeter form', e);
       return false;
     }
   }
 
-  function safeClosest(el, selector) {
-    try {
-      return el && el.closest ? el.closest(selector) : null;
-    } catch (err) {
-      return null;
+  function resumeOriginalNow(analysis) {
+    if (!analysis) return;
+    setResuming(true);
+    setTimeout(function () {
+      try {
+        if (analysis.href) {
+          window.location.href = analysis.href;
+          return;
+        }
+        if (analysis.form) {
+          submitForm(analysis.form, analysis.candidate);
+          return;
+        }
+        if (analysis.candidate && analysis.candidate.click) {
+          analysis.candidate.setAttribute('data-idadeid-resuming', 'true');
+          analysis.candidate.click();
+          return;
+        }
+      } finally {
+        setTimeout(function () { setResuming(false); }, 1500);
+      }
+    }, 0);
+  }
+
+  async function resumePendingCheckout() {
+    var pending = getPendingCheckout();
+    if (!pending) {
+      log('sem pending checkout para retomar');
+      return false;
     }
+
+    log('retomando checkout pending', pending);
+    clearPendingCheckout();
+    setResuming(true);
+
+    setTimeout(function () {
+      try {
+        if (pending.href) {
+          window.location.href = pending.href;
+          return;
+        }
+
+        var form = findElement(pending.formSelector);
+        var button = findElement(pending.candidateSelector);
+
+        if (pending.type === 'form' && form) {
+          if (submitForm(form, button)) return;
+        }
+
+        if (button && button.click) {
+          button.setAttribute('data-idadeid-resuming', 'true');
+          button.click();
+          return;
+        }
+
+        if (form && submitForm(form, null)) return;
+
+        if (pending.formAction) {
+          window.location.href = pending.formAction;
+          return;
+        }
+
+        warn('não foi possível retomar automaticamente; usuário deverá clicar novamente');
+      } finally {
+        setTimeout(function () { setResuming(false); }, 1500);
+      }
+    }, 150);
+
+    return true;
   }
 
-  function normalizeText(value) {
-    return String(value || "")
-      .replace(/\s+/g, " ")
-      .trim()
-      .toLowerCase();
-  }
+  async function handleCheckoutEvent(event) {
+    if (isResuming() || state.sessionValid) return;
+    if (event && event.defaultPrevented) return;
 
-  function cssEscape(value) {
-    if (window.CSS && window.CSS.escape) {
-      return window.CSS.escape(value);
-    }
+    var analysis = analyzeCheckoutIntent(event.target, event);
+    log('análise checkout', {
+      intercept: analysis.intercept,
+      score: analysis.score,
+      reasons: analysis.reasons,
+      type: analysis.type,
+      href: analysis.href,
+      formAction: analysis.formAction,
+      text: analysis.text,
+    });
 
-    return String(value).replace(/"/g, '\\"');
-  }
+    if (!analysis.intercept) return;
 
-  function setStorage(key, value) {
-    try {
-      window.sessionStorage.setItem(key, value);
+    if (analysis.candidate && analysis.candidate.getAttribute && analysis.candidate.getAttribute('data-idadeid-resuming') === 'true') {
       return;
-    } catch (err) {}
-
-    try {
-      window.localStorage.setItem(key, value);
-    } catch (err2) {}
-  }
-
-  function getStorage(key) {
-    try {
-      return window.sessionStorage.getItem(key) || window.localStorage.getItem(key);
-    } catch (err) {
-      return null;
-    }
-  }
-
-  function removeStorage(key) {
-    try {
-      window.sessionStorage.removeItem(key);
-    } catch (err) {}
-
-    try {
-      window.localStorage.removeItem(key);
-    } catch (err2) {}
-  }
-
-  function log(message, data) {
-    try {
-      console.log("[IdadeID Checkout]", message, data || "");
-    } catch (err) {}
-  }
-
-  function warn(message, data) {
-    try {
-      console.warn("[IdadeID Checkout]", message, data || "");
-    } catch (err) {}
-  }
-
-  function mask(value) {
-    if (!value) {
-      return null;
     }
 
-    var str = String(value);
+    event.preventDefault();
+    if (event.stopImmediatePropagation) event.stopImmediatePropagation();
+    if (event.stopPropagation) event.stopPropagation();
 
-    if (str.length <= 12) {
-      return str;
+    var valid = await validateStoredSession();
+    if (valid) {
+      log('sessão ficou válida durante clique; retomando ação original');
+      resumeOriginalNow(analysis);
+      return;
     }
 
-    return str.slice(0, 12) + "...";
+    await redirectToGate(analysis);
+  }
+
+  function armCheckoutTrigger() {
+    if (state.armed) return;
+    state.armed = true;
+
+    document.addEventListener('click', handleCheckoutEvent, true);
+    document.addEventListener('submit', handleCheckoutEvent, true);
+    log('trigger armado');
+  }
+
+  async function boot() {
+    log('boot v' + VERSION);
+
+    if (!resolveSiteKey()) return;
+
+    await loadConfig();
+
+    var exchanged = await exchangeCodeIfPresent();
+    if (exchanged) return;
+
+    await validateStoredSession();
+
+    if (!state.sessionValid) {
+      armCheckoutTrigger();
+      return;
+    }
+
+    log('sessão já válida; checkout liberado');
+  }
+
+  window.IdadeIDCheckoutTrigger.debugState = function () {
+    return {
+      version: VERSION,
+      booted: !!window.IdadeIDCheckoutTrigger.__booted,
+      siteHash: state.siteHash,
+      hasConfig: !!state.config,
+      sessionValid: state.sessionValid,
+      armed: state.armed,
+      isResuming: isResuming(),
+      hasPendingCheckout: !!getPendingCheckout(),
+      lastAnalysis: state.lastAnalysis,
+      lastError: state.lastError,
+      origin: window.location.origin,
+      href: window.location.href,
+      hasCode: !!getUrlCode(),
+    };
+  };
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', boot, { once: true });
+  } else {
+    boot();
   }
 })();
