@@ -1,7 +1,7 @@
 (function () {
   "use strict";
 
-  var VERSION = "1.0.2-nuvemshop-gate-rpc";
+  var VERSION = "1.0.1-nuvemshop-gate-rpc";
 
   var SUPABASE_URL = "https://jrhcgndbpxbhmrgsezdd.supabase.co";
   var SUPABASE_ANON_KEY =
